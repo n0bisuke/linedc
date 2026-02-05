@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>IoTLT 実施都道府県マップ</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="header">
+      <div class="header__inner">
+        <h1>IoTLT 実施都道府県マップ</h1>
+        <p class="header__sub">data/iotlt_events.md から集計した「どの都道府県で開催したか」を1ビューで可視化します。</p>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="panel panel--map" aria-label="都道府県マップ">
+        <div class="panel__toolbar">
+          <div class="toolbar__group">
+            <label class="select">
+              <span>開催種別</span>
+              <select id="kindFilter">
+                <option value="onsite" selected>現地開催のみ</option>
+                <option value="all">すべて（オンライン/海外含む）</option>
+              </select>
+            </label>
+            <label class="select">
+              <span>年</span>
+              <select id="yearFilter">
+                <option value="all" selected>すべて</option>
+              </select>
+            </label>
+            <label class="select">
+              <span>テーマ</span>
+              <select id="themeSelect">
+                <option value="light" selected>ライト</option>
+                <option value="dark">ダーク</option>
+                <option value="system">自動</option>
+              </select>
+            </label>
+          </div>
+          <div class="toolbar__group toolbar__group--right">
+            <div class="legend" aria-label="凡例">
+              <div class="legend__swatch legend__swatch--0"></div><span>0</span>
+              <div class="legend__swatch legend__swatch--1"></div><span>1+</span>
+              <div class="legend__swatch legend__swatch--2"></div><span>5+</span>
+              <div class="legend__swatch legend__swatch--3"></div><span>10+</span>
+              <div class="legend__swatch legend__swatch--4"></div><span>20+</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="mapWrap">
+          <svg id="jpMap" class="map" viewBox="0 0 840 560" role="img" aria-label="日本地図（都道府県タイルマップ）"></svg>
+          <div id="tooltip" class="tooltip" hidden></div>
+        </div>
+      </section>
+
+      <aside class="panel panel--list" aria-label="選択した都道府県のイベント一覧">
+        <div class="panel__title">
+          <h2 id="selectionTitle">都道府県を選択</h2>
+          <p class="muted" id="selectionMeta"></p>
+        </div>
+        <div class="panel__content">
+          <input id="searchBox" class="search" type="search" placeholder="タイトル/会場/住所で絞り込み" />
+          <div id="list" class="list" aria-live="polite"></div>
+        </div>
+      </aside>
+    </main>
+
+    <footer class="footer">
+      <div class="footer__inner">
+        <span class="muted">生成: <code>python3 scripts/build_events_json.py</code></span>
+      </div>
+    </footer>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
