@@ -2,6 +2,10 @@ name: Fetch LINEDC events
 
 on:
   workflow_dispatch: {}
+  push:
+    branches:
+      - main
+      - master
   schedule:
     # GitHub Actions cron is UTC.
     # Runs at 00:00 and 12:00 UTC (twice a day).
@@ -41,6 +45,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data/linedc_events.md docs/events.json
-          git commit -m "Update LINEDC events"
+          git commit -m "Update LINEDC events [skip ci]"
           git push
-
