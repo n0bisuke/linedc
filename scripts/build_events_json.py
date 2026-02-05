@@ -339,8 +339,8 @@ def parse_events(markdown_path: Path) -> list[EventRow]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--in", dest="input_path", default="data/iotlt_events.md")
-    parser.add_argument("--out", dest="output_path", default="web/events.json")
+    parser.add_argument("--in", dest="input_path", default="data/linedc_events.md")
+    parser.add_argument("--out", dest="output_path", default="docs/events.json")
     args = parser.parse_args()
 
     input_path = Path(args.input_path)

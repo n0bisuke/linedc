@@ -4,6 +4,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
@@ -68,7 +69,13 @@ def _save_slide_cache() -> None:
     tmp_path.replace(_SLIDE_CACHE_PATH)
 
 
-def _run_curl(url: str, *, timeout_seconds: int = 30, head_only: bool = False) -> tuple[int, str, bytes]:
+def _run_curl(
+    url: str,
+    *,
+    timeout_seconds: int = 30,
+    head_only: bool = False,
+    retries: int = 3,
+) -> tuple[int, str, bytes]:
     """
     Returns (http_status, effective_url, body_bytes).
     Uses curl so we can rely on the caller's network settings.
@@ -81,11 +88,19 @@ def _run_curl(url: str, *, timeout_seconds: int = 30, head_only: bool = False) -
         cmd += ["-o", "-", "-w", "\n" + marker.decode("ascii") + "%{http_code} %{url_effective}\n"]
     cmd.append(url)
 
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if proc.returncode != 0:
-        raise RuntimeError(f"curl failed ({proc.returncode}) for {url}: {proc.stderr.decode('utf-8', 'ignore')}")
+    last_err: Optional[str] = None
+    for attempt in range(max(1, retries + 1)):
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if proc.returncode == 0:
+            raw = proc.stdout
+            break
+        last_err = proc.stderr.decode("utf-8", "ignore")
+        # Small backoff for transient DNS / network failures.
+        if attempt < retries:
+            time.sleep(min(6, 1.0 * (2**attempt)))
+            continue
+        raise RuntimeError(f"curl failed ({proc.returncode}) for {url}: {last_err}")
 
-    raw = proc.stdout
     if head_only:
         meta = raw
         body = b""
@@ -406,28 +421,31 @@ def _infer_type_and_vol(title: str) -> tuple[str, str]:
     return "本体", vol
 
 
-def _event_row_from_url(url: str) -> EventRow:
-    status, _effective, body = _run_curl(url, timeout_seconds=30, head_only=False)
-    if status != 200:
-        raise RuntimeError(f"unexpected status {status} for {url}")
-    html = body.decode("utf-8", "ignore")
-
+def _event_row_from_html(
+    html: str,
+    *,
+    url: str,
+    validate_slides: bool,
+    resolve_shorteners: bool,
+    participants_override: Optional[int] = None,
+    allow_missing_participants: bool = False,
+) -> EventRow:
     try:
         title = _extract_title(html)
         event_type, vol = _infer_type_and_vol(title)
         date = _extract_date(html)
         weekday, time_range = _extract_weekday_and_timerange(html)
-        participants: Optional[int]
-        try:
-            participants = _extract_participants(html)
-        except RuntimeError:
-            p_status, _p_eff, p_body = _run_curl(url.rstrip("/") + "/participation/", timeout_seconds=30, head_only=False)
-            if p_status == 200:
-                participants = _extract_participants(p_body.decode("utf-8", "ignore"))
-            else:
+        participants: Optional[int] = participants_override
+        if participants is None:
+            try:
+                participants = _extract_participants(html)
+            except RuntimeError:
                 participants = None
         if participants is None:
-            raise RuntimeError("could not extract participants (including fallback)")
+            if allow_missing_participants:
+                participants = 0
+            else:
+                raise RuntimeError("could not extract participants")
         venue_name, address = _extract_place_name_and_address(html)
         mode = _infer_mode(venue_name, address)
     except Exception as e:
@@ -438,7 +456,7 @@ def _event_row_from_url(url: str) -> EventRow:
     slide_urls_raw: list[str] = []
     for link in links:
         d = _domain(link)
-        if d in SHORTENER_DOMAINS:
+        if resolve_shorteners and d in SHORTENER_DOMAINS:
             try:
                 _st, effective, _b = _run_curl(link, timeout_seconds=12, head_only=True)
                 link = effective
@@ -453,10 +471,14 @@ def _event_row_from_url(url: str) -> EventRow:
                 continue
             slide_urls_raw.append(link)
 
-    slide_urls: list[str] = []
-    for link in slide_urls_raw:
-        if is_valid_slide_url(link):
-            slide_urls.append(link)
+    if validate_slides:
+        slide_urls: list[str] = []
+        for link in slide_urls_raw:
+            if is_valid_slide_url(link):
+                slide_urls.append(link)
+    else:
+        # Fast path: skip HTTP validation to keep full rebuilds practical.
+        slide_urls = list(dict.fromkeys(slide_urls_raw))
 
     return EventRow(
         vol=vol,
@@ -472,6 +494,37 @@ def _event_row_from_url(url: str) -> EventRow:
         date_yyyy_mm_dd=date,
         weekday_ja=weekday,
         time_range=time_range,
+    )
+
+
+def _event_row_from_url(url: str, *, validate_slides: bool) -> EventRow:
+    status, _effective, body = _run_curl(url, timeout_seconds=25, head_only=False)
+    if status != 200:
+        raise RuntimeError(f"unexpected status {status} for {url}")
+    html = body.decode("utf-8", "ignore")
+
+    try:
+        return _event_row_from_html(
+            html,
+            url=url,
+            validate_slides=validate_slides,
+            resolve_shorteners=True,
+        )
+    except RuntimeError as e:
+        if "could not extract participants" not in str(e):
+            raise
+
+    p_status, _p_eff, p_body = _run_curl(url.rstrip("/") + "/participation/", timeout_seconds=25, head_only=False)
+    if p_status != 200:
+        raise RuntimeError(f"could not extract participants (status={p_status}) (url={url})")
+    p_html = p_body.decode("utf-8", "ignore")
+    participants = _extract_participants(p_html)
+    return _event_row_from_html(
+        html,
+        url=url,
+        validate_slides=validate_slides,
+        resolve_shorteners=True,
+        participants_override=participants,
     )
 
 
@@ -504,31 +557,28 @@ def _try_event_urls_from_list_page(page: int) -> list[str]:
 
 def _detect_oldest_page() -> int:
     """
-    connpass group pages don't always show a link to the last page.
-    Probe pages to find the maximum page that still has events.
+    connpass group pages don't always show a link to the last page, and
+    out-of-range pages may render the last page's content while keeping the
+    requested `?page=` in the URL.
+
+    Strategy: fetch a very large page number and read the "active" page number
+    from the pagination, which represents the actual last page.
     """
-    if not _try_event_urls_from_list_page(1):
-        raise RuntimeError("could not find any events on page=1 (are you blocked?)")
+    status, _effective, body = _run_curl(LIST_URL_TEMPLATE.format(page=999999), timeout_seconds=20, head_only=False)
+    if status != 200:
+        raise RuntimeError("could not detect oldest page (non-200 on probe)")
 
-    ok = 1
-    ng = 2
-    while True:
-        if _try_event_urls_from_list_page(ng):
-            ok = ng
-            ng *= 2
-            continue
-        break
+    html = body.decode("utf-8", "ignore")
+    m = re.search(r'<li[^>]*class="active"[^>]*>\s*<span>\s*(\d+)\s*</span>', html)
+    if m:
+        return int(m.group(1))
 
-    # binary search (ok has events, ng has none)
-    lo = ok
-    hi = ng
-    while lo + 1 < hi:
-        mid = (lo + hi) // 2
-        if _try_event_urls_from_list_page(mid):
-            lo = mid
-        else:
-            hi = mid
-    return lo
+    # Fallback: use maximum page number visible in pagination links.
+    pages = [int(x) for x in re.findall(r"[?&]page=(\d+)", html)]
+    if pages:
+        return max(pages)
+
+    raise RuntimeError("could not detect oldest page (no pagination found)")
 
 
 def _ensure_table_header(path: Path) -> None:
@@ -627,15 +677,25 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--end-page", type=int, default=None, help="end page (inclusive). If omitted, only start-page is processed.")
     ap.add_argument("--limit", type=int, default=5, help="number of NEW events to append")
     ap.add_argument("--out", type=str, default="data/linedc_events.md", help="output markdown file")
-    ap.add_argument("--slide-cache", type=str, default="data/slide_url_cache_linedc.json", help="JSON cache for slide URL validation")
+    ap.add_argument("--slide-cache", type=str, default="data/slide_url_cache.json", help="JSON cache for slide URL validation")
+    ap.add_argument("--validate-slides", action="store_true", help="validate slide URLs by HTTP access (slow)")
+    ap.add_argument("--raw-dir", type=str, default=None, help="offline mode: directory containing event_urls.txt and events/*.html")
+    ap.add_argument("--sleep", type=float, default=0.0, help="sleep seconds between requests (politeness)")
     ap.add_argument("--rebuild", action="store_true", help="rebuild the markdown from scratch (overwrites --out)")
     args = ap.parse_args(argv)
 
     out_path = Path(args.out)
-    _load_slide_cache(Path(args.slide_cache))
+    raw_dir = Path(args.raw_dir) if args.raw_dir else None
+    sleep_s = max(0.0, float(args.sleep or 0.0))
+
+    if raw_dir is not None and not args.rebuild:
+        raise RuntimeError("--raw-dir requires --rebuild")
+
+    if args.validate_slides:
+        _load_slide_cache(Path(args.slide_cache))
 
     start_page = args.start_page
-    if start_page == 0:
+    if raw_dir is None and start_page == 0:
         start_page = _detect_oldest_page()
 
     end_page = (1 if args.rebuild and args.end_page is None else start_page) if args.end_page is None else args.end_page
@@ -643,25 +703,65 @@ def main(argv: list[str]) -> int:
         raise RuntimeError("--end-page must be <= --start-page")
 
     if args.rebuild:
+        if raw_dir is not None:
+            urls_path = raw_dir / "event_urls.txt"
+            if not urls_path.exists():
+                raise RuntimeError(f"missing {urls_path}")
+            urls = [u.strip() for u in urls_path.read_text(encoding="utf-8").splitlines() if u.strip()]
+
+            all_rows: list[EventRow] = []
+            for u in urls:
+                m = re.search(r"/event/(\\d+)/", u)
+                if not m:
+                    continue
+                html_path = raw_dir / "events" / f"{m.group(1)}.html"
+                if not html_path.exists():
+                    continue
+                html = html_path.read_text(encoding="utf-8", errors="ignore")
+                all_rows.append(
+                    _event_row_from_html(
+                        html,
+                        url=u,
+                        validate_slides=False,
+                        resolve_shorteners=False,
+                        allow_missing_participants=True,
+                    )
+                )
+                if sleep_s:
+                    time.sleep(sleep_s)
+
+            all_rows.sort(key=lambda r: (r.date_yyyy_mm_dd, r.time_range, r.connpass_url))
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text("", encoding="utf-8")
+            _ensure_table_header(out_path)
+            append_rows(out_path, all_rows, 1)
+            return 0
+
         all_rows: list[EventRow] = []
         seen_urls: set[str] = set()
         for page in range(start_page, end_page - 1, -1):
             urls = _event_urls_from_list_page(page)
             if not urls:
                 raise RuntimeError(f"no event URLs found on page={page}")
+            if sleep_s:
+                time.sleep(sleep_s)
             for u in urls:
                 if u in seen_urls:
                     continue
                 seen_urls.add(u)
-                all_rows.append(_event_row_from_url(u))
-            _save_slide_cache()
+                all_rows.append(_event_row_from_url(u, validate_slides=args.validate_slides))
+                if sleep_s:
+                    time.sleep(sleep_s)
+            if args.validate_slides:
+                _save_slide_cache()
 
         all_rows.sort(key=lambda r: (r.date_yyyy_mm_dd, r.time_range, r.connpass_url))
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text("", encoding="utf-8")
         _ensure_table_header(out_path)
         append_rows(out_path, all_rows, 1)
-        _save_slide_cache()
+        if args.validate_slides:
+            _save_slide_cache()
         return 0
 
     _ensure_table_header(out_path)
@@ -677,12 +777,16 @@ def main(argv: list[str]) -> int:
         urls = _event_urls_from_list_page(page)
         if not urls:
             raise RuntimeError(f"no event URLs found on page={page}")
+        if sleep_s:
+            time.sleep(sleep_s)
 
         rows: list[EventRow] = []
         for u in urls:
             if u in existing_urls:
                 continue
-            rows.append(_event_row_from_url(u))
+            rows.append(_event_row_from_url(u, validate_slides=args.validate_slides))
+            if sleep_s:
+                time.sleep(sleep_s)
         rows.sort(key=lambda r: (r.date_yyyy_mm_dd, r.connpass_url))
 
         rows = rows[:remaining]
@@ -692,9 +796,11 @@ def main(argv: list[str]) -> int:
                 existing_urls.add(r.connpass_url)
             current_id += len(rows)
             remaining -= len(rows)
-            _save_slide_cache()
+            if args.validate_slides:
+                _save_slide_cache()
 
-    _save_slide_cache()
+    if args.validate_slides:
+        _save_slide_cache()
     return 0
 
 

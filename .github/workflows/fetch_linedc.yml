@@ -1,0 +1,46 @@
+name: Fetch LINEDC events
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # GitHub Actions cron is UTC.
+    # Runs at 00:00 and 12:00 UTC (twice a day).
+    - cron: "0 0 * * *"
+    - cron: "0 12 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fetch-linedc
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Scrape and build
+        run: |
+          python3 scripts/scrape_linedc_connpass.py --rebuild --out data/linedc_events.md --sleep 0.2
+          python3 scripts/build_events_json.py --in data/linedc_events.md --out docs/events.json
+
+      - name: Commit changes (if any)
+        run: |
+          if git diff --quiet; then
+            echo "No changes."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/linedc_events.md docs/events.json
+          git commit -m "Update LINEDC events"
+          git push
+

@@ -368,7 +368,7 @@ async function main() {
   const listEl = document.getElementById("list")
   const searchBox = document.getElementById("searchBox")
 
-  const THEME_KEY = "iotlt_theme"
+  const THEME_KEY = "linedc_theme"
   const media = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null
   function applyTheme(mode) {
     const root = document.documentElement

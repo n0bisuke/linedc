@@ -1,12 +1,11 @@
 {
-  "name": "iotlt",
+  "name": "linedc",
   "version": "1.0.0",
-  "description": "`scripts/scrape_iotlt_connpass.py` fetches IoTLT event pages from connpass, validates slide links, and appends rows to a Markdown table.",
+  "description": "`scripts/scrape_linedc_connpass.py` fetches LINEDC event pages from connpass, validates slide links, and appends rows to a Markdown table.",
   "main": "index.js",
   "scripts": {
-    "build:data": "python3 scripts/build_events_json.py --in data/iotlt_events.md --out web/events.json",
-    "build:data:linedc": "python3 scripts/build_events_json.py --in data/linedc_events.md --out web/events_linedc.json",
-    "serve": "serve web -l 8000",
+    "build:data": "python3 scripts/build_events_json.py --in data/linedc_events.md --out docs/events.json",
+    "serve": "serve docs -l 8000",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
