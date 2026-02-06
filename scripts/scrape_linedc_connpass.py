@@ -81,7 +81,16 @@ def _run_curl(
     Uses curl so we can rely on the caller's network settings.
     """
     marker = b"__CURLMETA__"
-    cmd = ["curl", "-L", "--max-time", str(timeout_seconds), "-sS"]
+    # Workaround: some environments intermittently fail DNS resolution for the connpass subdomain.
+    cmd = [
+        "curl",
+        "-L",
+        "--max-time",
+        str(timeout_seconds),
+        "-sS",
+        "--connect-to",
+        "linedevelopercommunity.connpass.com:443:connpass.com:443",
+    ]
     if head_only:
         cmd += ["-o", "/dev/null", "-w", marker.decode("ascii") + "%{http_code} %{url_effective}"]
     else:
@@ -467,6 +476,9 @@ def _event_row_from_html(
             tweet_urls.append(link)
             continue
         if any(d == sd or d.endswith("." + sd) for sd in SLIDE_DOMAINS):
+            # Speaker Deck slide images live on files.speakerdeck.com; keep only canonical deck pages.
+            if d.endswith(".speakerdeck.com") and d != "speakerdeck.com":
+                continue
             if d == "docs.google.com" and "/presentation/" not in link:
                 continue
             slide_urls_raw.append(link)

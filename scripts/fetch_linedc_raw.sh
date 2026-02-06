@@ -14,15 +14,16 @@ curl_fetch() {
   local url="$1"
   local out="${2:-}"
   local max_attempts="${3:-12}"
+  local connect_to_opt=(--connect-to "linedevelopercommunity.connpass.com:443:connpass.com:443")
 
   local attempt=1
   while (( attempt <= max_attempts )); do
     if [[ -n "${out}" ]]; then
-      if curl -L --max-time 25 --retry 2 --retry-all-errors --retry-delay 1 -sS "${url}" -o "${out}"; then
+      if curl -L --max-time 25 --retry 2 --retry-all-errors --retry-delay 1 -sS "${connect_to_opt[@]}" "${url}" -o "${out}"; then
         return 0
       fi
     else
-      if curl -L --max-time 25 --retry 2 --retry-all-errors --retry-delay 1 -sS "${url}"; then
+      if curl -L --max-time 25 --retry 2 --retry-all-errors --retry-delay 1 -sS "${connect_to_opt[@]}" "${url}"; then
         return 0
       fi
     fi
@@ -37,31 +38,23 @@ curl_fetch() {
   return 1
 }
 
-probe_html="$(curl_fetch "${BASE_URL}/event/?page=999999")"
-last_page="$(printf "%s" "${probe_html}" | python3 - <<'PY'
-import re, sys
-html=sys.stdin.read()
-m=re.search(r'<li[^>]*class="active"[^>]*>\s*<span>\s*(\d+)\s*</span>', html)
-if m:
-    print(m.group(1))
-    raise SystemExit(0)
-pages=[int(x) for x in re.findall(r"[?&]page=(\d+)", html)]
-if pages:
-    print(max(pages))
-    raise SystemExit(0)
-raise SystemExit("could not detect last page")
-PY
-)"
-
-echo "Detected last page: ${last_page}" >&2
-
 tmp_urls="$(mktemp)"
 trap 'rm -f "${tmp_urls}"' EXIT
 
-for ((p=1; p<=last_page; p++)); do
-  echo "List page ${p}/${last_page}" >&2
+echo "Fetching list pages (follow pagination)..." >&2
+p=1
+seen_pages=""
+while :; do
+  if [[ " ${seen_pages} " == *" ${p} "* ]]; then
+    echo "Detected pagination loop at page=${p}; stop." >&2
+    break
+  fi
+  seen_pages="${seen_pages} ${p}"
+
   html_path="${RAW_DIR}/list/page_${p}.html"
+  echo "List page ${p}" >&2
   curl_fetch "${BASE_URL}/event/?page=${p}" "${html_path}"
+
   python3 - <<'PY' "${html_path}" >> "${tmp_urls}"
 import re, sys
 path=sys.argv[1]
@@ -69,6 +62,18 @@ html=open(path,"r",encoding="utf-8",errors="ignore").read()
 for href in re.findall(r'<a\s+class="url summary"\s+href="([^"]+)"', html):
     print(href.strip())
 PY
+
+  next_page="$(python3 - <<'PY' "${html_path}"
+import re, sys
+html=open(sys.argv[1],"r",encoding="utf-8",errors="ignore").read()
+m=re.search(r'<a[^>]+href="\\?page=(\\d+)"[^>]*>\\s*次へ', html)
+print(m.group(1) if m else "")
+PY
+)"
+  if [[ -z "${next_page}" ]]; then
+    break
+  fi
+  p="${next_page}"
 done
 
 sort -u "${tmp_urls}" > "${RAW_DIR}/event_urls.txt"
